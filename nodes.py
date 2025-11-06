@@ -14,7 +14,7 @@ from einops import rearrange
 from huggingface_hub import snapshot_download
 from .src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRTinyLongPipeline
 from .src.models.TCDecoder import build_tcdecoder
-from .src.models.utils import clean_vram, get_device_list, Buffer_LQ4x_Proj
+from .src.models.utils import clean_vram, get_device_list, Buffer_LQ4x_Proj, Causal_LQ4x_Proj
 from .src.models import wan_video_dit
 
 device_choices = get_device_list()
@@ -133,9 +133,12 @@ def create_feather_mask(size, overlap):
     
     return mask
 
-def init_pipeline(mode, device, dtype, alt_vae="none"):
-    model_downlod()
-    model_path = os.path.join(folder_paths.models_dir, "FlashVSR")
+def init_pipeline(version, mode, device, dtype, alt_vae="none"):
+    suffix = ""
+    if version == "1.1":
+        suffix = "-1.1"
+    model_downlod(name="JunhaoZhuang/FlashVSR"+suffix)
+    model_path = os.path.join(folder_paths.models_dir, "FlashVSR"+suffix)
     if not os.path.exists(model_path):
         raise RuntimeError(f'Model directory does not exist!\nPlease save all weights to "{model_path}"')
     ckpt_path = os.path.join(model_path, "diffusion_pytorch_model_streaming_dmd.safetensors")
@@ -174,10 +177,12 @@ def init_pipeline(mode, device, dtype, alt_vae="none"):
         pipe.TCDecoder = build_tcdecoder(new_channels=multi_scale_channels, device=device, dtype=dtype, new_latent_channels=16+768)
         mis = pipe.TCDecoder.load_state_dict(torch.load(tcd_path, map_location=device), strict=False)
         pipe.TCDecoder.clean_mem()
-        
-    pipe.denoising_model().LQ_proj_in = Buffer_LQ4x_Proj(in_dim=3, out_dim=1536, layer_num=1).to(device, dtype=dtype)
-    if os.path.exists(lq_path):
-        pipe.denoising_model().LQ_proj_in.load_state_dict(torch.load(lq_path, map_location="cpu"), strict=True)
+    
+    if version == "1.0":
+        pipe.denoising_model().LQ_proj_in = Buffer_LQ4x_Proj(in_dim=3, out_dim=1536, layer_num=1).to(device, dtype=dtype)
+    else:
+        pipe.denoising_model().LQ_proj_in = Causal_LQ4x_Proj(in_dim=3, out_dim=1536, layer_num=1).to(device, dtype=dtype)
+    pipe.denoising_model().LQ_proj_in.load_state_dict(torch.load(lq_path, map_location="cpu"), strict=True)
     pipe.denoising_model().LQ_proj_in.to(device)
     pipe.to(device, dtype=dtype)
     pipe.enable_vram_management(num_persistent_param_in_dit=None)
@@ -330,6 +335,10 @@ class FlashVSRNodeInitPipe:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "version": (["1.0", "1.1"], {
+                    "default": "1.0",
+                    "tooltip": "Model version."
+                }),
                 "mode": (["tiny", "tiny-long", "full"], {
                     "default": "tiny",
                     "tooltip": 'Using "tiny-long" mode can significantly reduce VRAM used with long video input.'
@@ -363,7 +372,7 @@ class FlashVSRNodeInitPipe:
     CATEGORY = "FlashVSR"
     DESCRIPTION = 'Download the entire "FlashVSR" folder with all the files inside it from "https://huggingface.co/JunhaoZhuang/FlashVSR" and put it in the "ComfyUI/models"'
     
-    def main(self, mode, alt_vae, force_offload, precision, device, attention_mode):
+    def main(self, version, mode, alt_vae, force_offload, precision, device, attention_mode):
         _device = device
         if device == "auto":
             _device = "cuda:0" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else device
@@ -388,7 +397,7 @@ class FlashVSRNodeInitPipe:
         except:
             dtype = torch.bfloat16
             
-        pipe = init_pipeline(mode, _device, dtype, alt_vae=alt_vae)
+        pipe = init_pipeline(version, mode, _device, dtype, alt_vae=alt_vae)
         return((pipe, force_offload),)
 
 class FlashVSRNodeAdv:
@@ -485,6 +494,10 @@ class FlashVSRNode:
                 "frames": ("IMAGE", {
                     "tooltip": "Sequential video frames as IMAGE tensor batch"
                 }),
+                "version": (["1.0", "1.1"], {
+                    "default": "1.0",
+                    "tooltip": "Model version."
+                }),
                 "mode": (["tiny", "tiny-long", "full"], {
                     "default": "tiny",
                     "tooltip": 'Using "tiny-long" mode can significantly reduce VRAM used with long video input.'
@@ -520,13 +533,13 @@ class FlashVSRNode:
     CATEGORY = "FlashVSR"
     DESCRIPTION = 'Download the entire "FlashVSR" folder with all the files inside it from "https://huggingface.co/JunhaoZhuang/FlashVSR" and put it in the "ComfyUI/models"'
     
-    def main(self, frames, mode, scale, tiled_vae, tiled_dit, unload_dit, seed):
+    def main(self, version, frames, mode, scale, tiled_vae, tiled_dit, unload_dit, seed):
         wan_video_dit.USE_BLOCK_ATTN = False
         _device = "cuda:0" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "auto"
         if _device == "auto" or _device not in device_choices:
             raise RuntimeError("No devices found to run FlashVSR!")
             
-        pipe = init_pipeline(mode, _device, torch.float16)
+        pipe = init_pipeline(version, mode, _device, torch.float16)
         output = flashvsr(pipe, frames, scale, True, tiled_vae, tiled_dit, 256, 24, unload_dit, 2.0, 3.0, 11, seed, True)
         return(output,)
 
