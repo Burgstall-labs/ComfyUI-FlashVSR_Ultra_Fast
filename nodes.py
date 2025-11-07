@@ -294,6 +294,13 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
             weight_sum_canvas[:, out_y1:out_y2, out_x1:out_x2, :] += mask_nhwc
             
             del LQ_tile, output_tile_gpu, processed_tile_cpu, input_tile
+            # Explicitly delete mask tensors
+            del mask_nchw, mask_nhwc
+            # Clear pipeline caches between tiles to prevent accumulation
+            if hasattr(pipe, 'denoising_model') and hasattr(pipe.denoising_model(), 'LQ_proj_in'):
+                pipe.denoising_model().LQ_proj_in.clear_cache()
+            if hasattr(pipe, 'TCDecoder'):
+                pipe.TCDecoder.clean_mem()
             clean_vram()
             
         weight_sum_canvas[weight_sum_canvas == 0] = 1.0

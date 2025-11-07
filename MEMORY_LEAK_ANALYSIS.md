@@ -2,15 +2,21 @@
 
 ## Executive Summary
 
-A critical memory leak was identified in the `Buffer_LQ4x_Proj` class within `src/models/utils.py`. The leak was caused by incorrect cache assignment order in the causal convolution operations, causing intermediate tensors to accumulate in GPU/CPU memory during video processing.
+**TWO critical memory leaks** were identified and fixed in the FlashVSR ComfyUI implementation:
 
-## Root Cause
+1. **Buffer_LQ4x_Proj Cache Assignment Bug** (`src/models/utils.py`) - Affected FlashVSR original model
+2. **Tiled DIT Processing Leak** (`nodes.py`) - Affected all models when using tiled_dit mode, especially with larger tile sizes
+
+Both leaks caused intermediate tensors to accumulate in GPU/CPU memory during video processing.
+
+## Memory Leak #1: Buffer_LQ4x_Proj Cache Assignment
 
 ### Location
 - **File**: `src/models/utils.py`
 - **Class**: `Buffer_LQ4x_Proj`
 - **Methods**: `forward()` and `stream_forward()`
 - **Lines**: 304-310 (forward), 338-356 (stream_forward)
+- **Affects**: FlashVSR original model only (FlashVSR-v1.1 uses Causal_LQ4x_Proj which was already correct)
 
 ### The Bug
 
@@ -73,9 +79,45 @@ This proves the developers were aware of the correct pattern but failed to apply
 - Potential crashes with OOM errors
 - Performance degradation over time
 
-## Fix Applied
+## Memory Leak #2: Tiled DIT Processing
 
-### Changes Made
+### Location
+- **File**: `nodes.py`
+- **Function**: `flashvsr()`
+- **Lines**: 266-304 (tiled_dit processing loop)
+- **Affects**: All models (FlashVSR and FlashVSR-v1.1) when using tiled_dit mode
+
+### The Bug
+
+In the tiled DIT processing loop, memory was accumulating between tile iterations:
+
+1. **Mask tensors not explicitly deleted**: `mask_nchw` and `mask_nhwc` tensors scaled with tile size but weren't deleted
+2. **Pipeline caches persist across tiles**: `LQ_proj_in` and `TCDecoder` internal caches accumulated across spatial tiles
+3. **Why tile_size matters**: Larger tiles (288 vs 256) → larger cached tensors → faster memory accumulation
+
+**Before:**
+```python
+del LQ_tile, output_tile_gpu, processed_tile_cpu, input_tile
+clean_vram()
+# Missing: mask tensors and pipeline cache cleanup
+```
+
+**After:**
+```python
+del LQ_tile, output_tile_gpu, processed_tile_cpu, input_tile
+# Explicitly delete mask tensors
+del mask_nchw, mask_nhwc
+# Clear pipeline caches between tiles to prevent accumulation
+if hasattr(pipe, 'denoising_model') and hasattr(pipe.denoising_model(), 'LQ_proj_in'):
+    pipe.denoising_model().LQ_proj_in.clear_cache()
+if hasattr(pipe, 'TCDecoder'):
+    pipe.TCDecoder.clean_mem()
+clean_vram()
+```
+
+## Fixes Applied
+
+### Fix #1: Buffer_LQ4x_Proj Cache Assignment
 
 **File**: `src/models/utils.py`
 
@@ -114,6 +156,18 @@ self.cache['conv2'] = cache2_x              # ✅ Then update
 
 Applied the same cache assignment order fix to both branches (clip_idx == 0 and else).
 
+### Fix #2: Tiled DIT Processing Cleanup
+
+**File**: `nodes.py`
+
+**Location**: `flashvsr()` function, lines 296-304
+
+Added explicit cleanup of mask tensors and pipeline caches between tile iterations:
+- Delete mask tensors (`mask_nchw`, `mask_nhwc`)
+- Clear `LQ_proj_in.clear_cache()` between tiles
+- Clear `TCDecoder.clean_mem()` between tiles
+- Safe hasattr checks ensure compatibility with all pipeline modes
+
 ## Verification
 
 ### Testing Recommendations
@@ -123,13 +177,18 @@ Applied the same cache assignment order fix to both branches (clip_idx == 0 and 
 3. **Multiple Runs**: Execute multiple inference runs in sequence to verify memory is released
 4. **Comparison Test**: Compare memory usage between FlashVSR (now fixed) and FlashVSR-v1.1
 
-### Expected Results After Fix
+### Expected Results After Fixes
 
-- ✅ Stable memory consumption throughout processing
-- ✅ Memory properly released after each frame
-- ✅ No progressive memory accumulation
-- ✅ Consistent performance across multiple runs
-- ✅ No OOM errors on reasonable video lengths
+**Fix #1 (Buffer_LQ4x_Proj)**:
+- ✅ Stable memory for FlashVSR original model users
+- ✅ Proper temporal cache handling
+
+**Fix #2 (Tiled DIT)**:
+- ✅ tile_size=288 works the same as tile_size=256
+- ✅ Memory usage stable across all tile iterations
+- ✅ No progressive accumulation regardless of tile count or size
+- ✅ Consistent performance across multiple tiled runs
+- ✅ No OOM errors with larger tile sizes
 
 ## Additional Notes
 
@@ -153,7 +212,13 @@ The bug likely occurred because:
 
 ## Conclusion
 
-The memory leak has been successfully identified and fixed by correcting the cache assignment order in the `Buffer_LQ4x_Proj` class to match the correct implementation in `Causal_LQ4x_Proj`. This ensures proper temporal causality in the causal convolution operations and prevents tensor reference accumulation in PyTorch's autograd graph.
+Two distinct memory leaks have been successfully identified and fixed:
+
+1. **Buffer_LQ4x_Proj cache bug**: Fixed cache assignment order to ensure proper temporal causality and prevent tensor accumulation for FlashVSR original model users.
+
+2. **Tiled DIT processing leak**: Added explicit cleanup of mask tensors and pipeline caches between tile iterations, preventing memory accumulation when using tiled_dit mode with any tile size.
+
+These fixes work together to ensure stable memory usage across all FlashVSR modes, model versions, and processing configurations.
 
 **Status**: ✅ **FIXED**
 
