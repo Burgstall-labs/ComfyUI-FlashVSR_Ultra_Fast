@@ -297,8 +297,11 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
             # Explicitly delete mask tensors
             del mask_nchw, mask_nhwc
             # Clear pipeline caches between tiles to prevent accumulation
-            if hasattr(pipe, 'denoising_model') and hasattr(pipe.denoising_model(), 'LQ_proj_in'):
-                pipe.denoising_model().LQ_proj_in.clear_cache()
+            if hasattr(pipe, 'denoising_model'):
+                if hasattr(pipe.denoising_model(), 'LQ_proj_in'):
+                    pipe.denoising_model().LQ_proj_in.clear_cache()
+                if hasattr(pipe.denoising_model(), 'clear_cache'):
+                    pipe.denoising_model().clear_cache()
             if hasattr(pipe, 'TCDecoder'):
                 pipe.TCDecoder.clean_mem()
             clean_vram()
