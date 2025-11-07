@@ -488,7 +488,7 @@ class FlashVSRNodeAdv:
     def main(self, pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed):
         _pipe, force_offload = pipe
         output = flashvsr(_pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, force_offload)
-        return(output,)
+        return(output.cpu().float(),)
 
 class FlashVSRNode:
     @classmethod
@@ -545,7 +545,7 @@ class FlashVSRNode:
             
         pipe = init_pipeline(model, mode, _device, torch.float16)
         output = flashvsr(pipe, frames, scale, True, tiled_vae, tiled_dit, 256, 24, unload_dit, 2.0, 3.0, 11, seed, True)
-        return(output,)
+        return(output.cpu().float(),)
 
 NODE_CLASS_MAPPINGS = {
     "FlashVSRNode": FlashVSRNode,
