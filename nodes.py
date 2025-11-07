@@ -304,7 +304,7 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
             clean_vram()
             
         weight_sum_canvas[weight_sum_canvas == 0] = 1.0
-        final_output = final_output_canvas / weight_sum_canvas
+        final_output = (final_output_canvas / weight_sum_canvas).float()
     else:
         log("[FlashVSR] Preparing frames...")
         LQ, th, tw, F = prepare_input_tensor(_frames, _device, scale=scale, dtype=dtype)
