@@ -169,29 +169,42 @@ Added explicit cleanup of mask tensors and pipeline caches between tile iteratio
 - Clear `TCDecoder.clean_mem()` between tiles
 - Safe hasattr checks ensure compatibility with all pipeline modes
 
-### Fix #3: Tiled Output Dtype Conversion
+### Fix #3: Output Dtype Conversion (Belt-and-Suspenders Approach)
 
 **File**: `nodes.py`
 
-**Location**: `flashvsr()` function, line 307
+**Dual-layer fix for maximum safety**:
 
-**Issue**: Tiled path returned bf16/fp16 tensors while non-tiled path returned float32, causing failures in downstream nodes.
-
-**Before:**
+#### Layer 1: Internal Tiled Fix (line 307)
 ```python
+# Before:
 final_output = final_output_canvas / weight_sum_canvas
-```
 
-**After:**
-```python
+# After:
 final_output = (final_output_canvas / weight_sum_canvas).float()
 ```
+Ensures tiled path produces float32 internally.
+
+#### Layer 2: Node Output Safety Fix (lines 491, 548)
+```python
+# Before:
+return(output,)
+
+# After (credit: Kijai):
+return(output.cpu().float(),)
+```
+Added to both `FlashVSRNodeAdv` and `FlashVSRNode` for defense-in-depth.
+
+**Why both fixes**:
+- Internal fix: Addresses root cause in tiled path
+- Output fix: Guarantees float32 on CPU regardless of path
+- Redundant conversions are safe no-ops
+- Provides maximum robustness
 
 **Why this matters**:
 - ComfyUI IMAGE tensors must be float32
-- Non-tiled path uses `tensor2video()` which includes `.float()` conversion
-- Tiled path was missing this conversion
-- Downstream nodes like Fill's FILM expect float32 and fail with bf16/fp16
+- Tiled path was outputting bf16/fp16 (pipe.torch_dtype)
+- Downstream nodes like Fill's FILM expect float32 and fail otherwise
 
 ## Verification
 
