@@ -2,12 +2,13 @@
 
 ## Executive Summary
 
-**TWO critical memory leaks** were identified and fixed in the FlashVSR ComfyUI implementation:
+**THREE critical issues** were identified and fixed in the FlashVSR ComfyUI implementation:
 
-1. **Buffer_LQ4x_Proj Cache Assignment Bug** (`src/models/utils.py`) - Affected FlashVSR original model
-2. **Tiled DIT Processing Leak** (`nodes.py`) - Affected all models when using tiled_dit mode, especially with larger tile sizes
+1. **Buffer_LQ4x_Proj Cache Assignment Bug** (`src/models/utils.py`) - Memory leak affecting FlashVSR original model
+2. **Tiled DIT Processing Leak** (`nodes.py`) - Memory leak affecting all models when using tiled_dit mode, especially with larger tile sizes
+3. **Tiled Output Dtype Mismatch** (`nodes.py`) - Compatibility issue causing failures in downstream nodes like Fill's FILM
 
-Both leaks caused intermediate tensors to accumulate in GPU/CPU memory during video processing.
+The first two caused intermediate tensors to accumulate in GPU/CPU memory, while the third caused dtype incompatibility with ComfyUI's IMAGE tensor requirements.
 
 ## Memory Leak #1: Buffer_LQ4x_Proj Cache Assignment
 
@@ -168,6 +169,30 @@ Added explicit cleanup of mask tensors and pipeline caches between tile iteratio
 - Clear `TCDecoder.clean_mem()` between tiles
 - Safe hasattr checks ensure compatibility with all pipeline modes
 
+### Fix #3: Tiled Output Dtype Conversion
+
+**File**: `nodes.py`
+
+**Location**: `flashvsr()` function, line 307
+
+**Issue**: Tiled path returned bf16/fp16 tensors while non-tiled path returned float32, causing failures in downstream nodes.
+
+**Before:**
+```python
+final_output = final_output_canvas / weight_sum_canvas
+```
+
+**After:**
+```python
+final_output = (final_output_canvas / weight_sum_canvas).float()
+```
+
+**Why this matters**:
+- ComfyUI IMAGE tensors must be float32
+- Non-tiled path uses `tensor2video()` which includes `.float()` conversion
+- Tiled path was missing this conversion
+- Downstream nodes like Fill's FILM expect float32 and fail with bf16/fp16
+
 ## Verification
 
 ### Testing Recommendations
@@ -183,12 +208,18 @@ Added explicit cleanup of mask tensors and pipeline caches between tile iteratio
 - ✅ Stable memory for FlashVSR original model users
 - ✅ Proper temporal cache handling
 
-**Fix #2 (Tiled DIT)**:
+**Fix #2 (Tiled DIT Memory)**:
 - ✅ tile_size=288 works the same as tile_size=256
 - ✅ Memory usage stable across all tile iterations
 - ✅ No progressive accumulation regardless of tile count or size
 - ✅ Consistent performance across multiple tiled runs
 - ✅ No OOM errors with larger tile sizes
+
+**Fix #3 (Tiled Output Dtype)**:
+- ✅ Tiled output is float32, matching non-tiled output
+- ✅ Fill's FILM node works correctly with FlashVSR output
+- ✅ All downstream nodes receive proper float32 IMAGE tensors
+- ✅ Consistent behavior regardless of tiled_dit setting
 
 ## Additional Notes
 
@@ -212,13 +243,15 @@ The bug likely occurred because:
 
 ## Conclusion
 
-Two distinct memory leaks have been successfully identified and fixed:
+Three distinct issues have been successfully identified and fixed:
 
 1. **Buffer_LQ4x_Proj cache bug**: Fixed cache assignment order to ensure proper temporal causality and prevent tensor accumulation for FlashVSR original model users.
 
 2. **Tiled DIT processing leak**: Added explicit cleanup of mask tensors and pipeline caches between tile iterations, preventing memory accumulation when using tiled_dit mode with any tile size.
 
-These fixes work together to ensure stable memory usage across all FlashVSR modes, model versions, and processing configurations.
+3. **Tiled output dtype mismatch**: Added float32 conversion to tiled output path to ensure ComfyUI compatibility and prevent failures in downstream nodes expecting float32 IMAGE tensors.
+
+These fixes work together to ensure stable memory usage, correct dtype handling, and full compatibility across all FlashVSR modes, model versions, and processing configurations.
 
 **Status**: ✅ **FIXED**
 
